@@ -1,1 +1,1 @@
-Hello! Welcome to my repo, for the GIAA Data Analytics Specialist interview you will be interested in the .Rmd file named "Data-Analytics-Speciailist.Rmd" (please forgive the typo!)
+Hello! Welcome to my repo, for the GIAA Data Analytics Specialist interview you will be interested in the .Rmd file named "Data-Analytics-Speciailist.Rmd" and the resulting .html file it produces. I look forward to taking you through it (andplease forgive the typo!)
