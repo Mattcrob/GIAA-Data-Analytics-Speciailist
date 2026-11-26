@@ -1,20 +1,56 @@
 ---
-title: "Data Analytics Specialist - Matt Roberts"
-output: html_document
-date: "2026-11-26"
+title: "Analysis of MPs Expenses"
+subtitle: "GIAA Interview - Data Analytics Specialist"
+output:
+  html_document:
+    toc: true
+    toc_float:
+      collapsed: false
+    toc_depth: 3
+    theme:
+      version: 4
+      base_font: !expr bslib::font_google("Montserrat")
+author: "Matt Roberts"
+date: "26/11/2026"
 ---
 
 ```{r setup, include=FALSE}
-knitr::opts_chunk$set(echo = FALSE, warning = FALSE, message = FALSE)
+knitr::opts_chunk$set(echo = FALSE, warning = FALSE, message = FALSE,
+                      fig.width = 12, fig.height = 6, out.width = "100%")
 
 library(tidyverse)
 library(ggridges)
 library(DT)
-```
-```{r data_load_and_clean, include=FALSE}
-knitr::opts_chunk$set(echo = TRUE)
 
+# ---- Configuration ----
 data_dir <- r"(C:\Users\mattc\OneDrive\Documents\git repos\GIAA-Data-Analytics-Speciailist\Raw Data)"
+budget_types <- c("Office", "Staffing", "Winding-up", "Accommodation", "Start-up")
+exclude_years_variance <- c("10/11", "11/12", "12/13")
+
+# ---- Shared plot helpers ----
+theme_set(theme_minimal(base_size = 12) + theme(legend.position = "right"))
+money_axis <- scale_y_continuous(labels = scales::label_number(
+  prefix = "£", scale_cut = scales::cut_short_scale()))
+```
+
+```{css, echo=FALSE}
+body { font-size: 14px; }
+h1 { font-size: 24px; }
+h2 { font-size: 20px; }
+h3 { font-size: 18px; }
+```
+
+```{r helpers, include=FALSE}
+# Parse money text, including -£1,234, (1,234) and Unicode minus signs
+parse_money <- function(x) {
+  x <- str_replace_all(x, "[\u2212\u2013\u2014]", "-")
+  neg <- str_detect(x, "^\\s*\\(.*\\)\\s*$") | str_detect(x, "-")
+  num <- suppressWarnings(as.numeric(str_remove_all(x, "[^0-9.]")))
+  if_else(neg, -num, num)
+}
+
+# Make financial year an ordered factor (chronological)
+fy_factor <- function(x) factor(x, levels = sort(unique(x)))
 
 standardise_columns <- function(df) {
   names(df) <- names(df) |>
@@ -33,7 +69,7 @@ standardise_columns <- function(df) {
     }
   }
 
-  # Drop the repeated "Reason for budget set", "Reason for budget set...4", etc.
+  # Drop the repeated "Reason for budget set" columns
   df <- df[, !str_starts(names(df), "Reason for budget set")]
 
   dupes <- names(df)[duplicated(names(df))]
@@ -51,7 +87,7 @@ load_series <- function(prefix, folder = data_dir, ...) {
     yr <- str_match(basename(f), "_(\\d+)_(\\d+)\\.csv$")
     df <- read_csv(f,
                    col_types = cols(.default = col_character()),  # everything as text
-                   name_repair = "minimal",                       # keep duplicate names for now
+                   name_repair = "minimal",
                    show_col_types = FALSE, ...) |>
       standardise_columns()
     df$financial_year <- paste0(yr[2], "/", yr[3])
@@ -69,136 +105,112 @@ load_series <- function(prefix, folder = data_dir, ...) {
 
   bind_rows(frames)
 }
+```
 
+```{r load-data, include=FALSE}
 spend <- load_series("totalSpend")
 
-```
-```{r clean-money, include=FALSE}
-# Budget types, keeping only those present in the data
-budgets <- c("Office", "Staffing", "Winding-up", "Accommodation", "Start-up")
-budgets <- budgets[paste(budgets, "budget") %in% names(spend) &
-                   paste(budgets, "spend")  %in% names(spend)]
+# Keep only budget types present in the data
+budgets <- budget_types[paste(budget_types, "budget") %in% names(spend) &
+                        paste(budget_types, "spend")  %in% names(spend)]
 
-money_cols <- paste(rep(budgets, each = 2), c("budget", "spend"))
+# Convert every money column (budget, spend and remaining) to numeric in one pass
+remaining_cols <- paste("Remaining", tolower(budgets), "budget")
+money_cols <- c(paste(rep(budgets, each = 2), c("budget", "spend")),
+                intersect(remaining_cols, names(spend)))
+spend <- spend |> mutate(across(all_of(money_cols), parse_money))
 
-# Strip £ signs, commas and spaces (incl. non-breaking), then convert to numeric
-spend <- spend |>
-  mutate(across(all_of(money_cols),
-                ~ suppressWarnings(as.numeric(str_remove_all(.x, "[£,\\s\u00a0]")))))
-```
-```{r usage, include=FALSE}
-# Total budget and spend by constituency, year and budget type.
-# Sum first, then divide, so constituencies with more than one MP are weighted by budget size.
-usage <- map_dfr(budgets, function(b) {
+# One tidy table (MP x year x budget type) that every plot and table builds from
+budget_long <- map_dfr(budgets, function(b) {
+  rem_col <- paste("Remaining", tolower(b), "budget")
+  has_rem <- rem_col %in% names(spend)   # check before transmute creates a column called `spend`
   spend |>
-    filter(!is.na(Constituency)) |>
-    group_by(Constituency, financial_year) |>
-    summarise(budget = sum(.data[[paste(b, "budget")]], na.rm = TRUE),
-              spend  = sum(.data[[paste(b, "spend")]],  na.rm = TRUE),
-              .groups = "drop") |>
-    mutate(budget_type = b)
-}) |>
-  mutate(pct_spent = if_else(budget > 0, spend / budget * 100, NA_real_))
-```
-```{r outliers, include=FALSE}
-usage_overspend_outliers <- usage |>
-  filter(budget > 0, pct_spent > 100) |>
-  mutate(overspend = spend - budget) |>
-  arrange(desc(pct_spent)) |>
-  select(Constituency, financial_year, budget_type,
-         budget, spend, overspend, pct_spent)
+    transmute(mp = `MP's name`, Constituency, financial_year,
+              budget_type = b,
+              budget    = .data[[paste(b, "budget")]],
+              spend     = .data[[paste(b, "spend")]],
+              remaining = if (has_rem) .data[[rem_col]] else NA_real_)
+})
 
-usage_overspend_outliers
-```
-```{r usage-clean}
-usage_clean <- usage |>
-  anti_join(usage_overspend_outliers,
-            by = c("Constituency", "financial_year", "budget_type"))
+fy_range <- range(budget_long$financial_year)
 ```
 
 # Overview
 
-This document provides an analysis of MPs expenses using the the "Total Spend" data from the [IPSA website](https://emea01.safelinks.protection.outlook.com/?url=https%3A%2F%2Fwww.theipsa.org.uk%2Fmp-staffing-business-costs%2Fannual-publications&data=05%7C02%7C%7C21b83ad4b01a40a55fff08df47119adc%7C84df9e7fe9f640afb435aaaaaaaaaaaa%7C1%7C0%7C639307813683239198%7CUnknown%7CTWFpbGZsb3d8eyJFbXB0eU1hcGkiOnRydWUsIlYiOiIwLjAuMDAwMCIsIlAiOiJXaW4zMiIsIkFOIjoiTWFpbCIsIldUIjoyfQ%3D%3D%7C0%7C%7C%7C&sdata=QyfmKtW%2FULjAnfnLy1rjGC%2BrKdXi5RkvzbbvDwYj%2FjY%3D&reserved=0). This analysis has been conducted using methods in python and R and with the support of Large Language Models; any AI outputs have been thoroughly reviewed before used.
+This document provides an analysis of MPs expenses using the "Total Spend" data from the [IPSA website](https://www.theipsa.org.uk/mp-staffing-business-costs/annual-publications). It has been conducted using methods in python and R and with the support of Large Language Models; any AI outputs have been thoroughly reviewed before use.
 
-The data set in question outlines spend by MPs in conducting their work representing constituencies and this analysis provides an overview of what the data includes, any immediate trends or patterns of note and a series of further inquiries that are recommended to be investigated further. The data spans financial years 10/11 - 25/26.
+The data set in question outlines spend by MPs in conducting their work representing constituencies and this analysis provides an overview of what the data includes, any immediate trends or patterns of note and a series of further inquiries that are recommended to be investigated further.
 
-## Executive summary
+# Executive Summary
 - Preliminary high-level analysis has been conducted on MPs expenses over the financial years 10/11 - 25/26 with particular attention paid to 13/14 - 25/26 due to data quality differences in the early years.
-- 
+- Spend associated with staffing expenses has significantly increased since FY 19/20 - approximately 50% increase over 5 years. Other budgetary items (Accommodation, Office, Start-up and Winding-up) showing no significant changes in the past 10-15 years.
+- The vast majority of MPs remain under or within the budget each year with specific instances of overspend highlighted in more detail.
+- Whilst spend related to staffing has seen a significant increase, the percentage of the budget being used appears to be dropping. This suggests extra available spend in each new budget is not always being used.
+- A series of further inquiries have been highlighted including detailed review of overspend instances, checks on data quality and confirmation of why staffing spend has increased.
 
+---
 
 # Budget and Actual Spend
 
-The data outlines spend against 5 categories (Accommodation, Office, Staffing, Start-up and Winding-up) so the first area of investigation is to see how, over the years, the budget has been spent against these areas.
+The data outlines spend against `r length(budgets)` categories (`r paste(sort(budgets), collapse = ", ")`); the first area investigated was the overall spend against budget.
 
-```{r absolute-spend, echo=FALSE, fig.width=12, fig.height=6, out.width="100%"}
+```{r absolute-spend}
 # Total budget and actual spend per category and year, summed across all constituencies
-absolute_spend <- spend |>
-  select(financial_year,
-         all_of(c(paste(budgets, "spend"), paste(budgets, "budget")))) |>
-  pivot_longer(-financial_year,
-               names_to = c("budget_type", "measure"),
-               names_pattern = "(.*) (spend|budget)",
-               values_to = "amount") |>
+absolute_spend <- budget_long |>
+  pivot_longer(c(budget, spend), names_to = "measure", values_to = "amount") |>
   group_by(financial_year, budget_type, measure) |>
-  summarise(total = if_else(all(is.na(amount)), NA_real_,
-                            sum(amount, na.rm = TRUE)),
+  summarise(total = if_else(all(is.na(amount)), NA_real_, sum(amount, na.rm = TRUE)),
             .groups = "drop") |>
-  mutate(financial_year = factor(financial_year,
-                                 levels = sort(unique(financial_year))))
+  mutate(financial_year = fy_factor(financial_year))
 
 ggplot(absolute_spend,
        aes(x = financial_year, y = total,
            colour = budget_type, linetype = measure,
            group = interaction(budget_type, measure))) +
   geom_line(linewidth = 1) +
-  geom_point(data = filter(absolute_spend, measure == "spend"), size = 2) +
+  geom_point(data = ~ dplyr::filter(.x, measure == "spend"), size = 2) +
   scale_linetype_manual(values = c(spend = "solid", budget = "dotted"),
                         labels = c(spend = "Actual spend", budget = "Budget")) +
-  scale_y_continuous(labels = scales::label_number(
-    prefix = "£", scale_cut = scales::cut_short_scale())) +
+  money_axis +
   labs(title = "Total spend and budget by category",
        subtitle = "All constituencies combined",
        x = "Financial year", y = "Total (£)",
-       colour = "Budget type", linetype = NULL) +
-  theme_minimal(base_size = 12) +
-  theme(legend.position = "right")
+       colour = "Budget type", linetype = NULL)
 ```
-***Figure 1****: Plot of total spend across financial years for each budget category. All financial years are included noting 25/26 will be incomplete.*
+***Figure 1****: Plot of total spend across financial years for each budget category.*
 
-This plot highlights that, over the years, spend for Staffing related expenses has been slowly increasing with a significant up tick in the rate of spend since 20/21; provisionally assumed to be COVID related and warrants further investigation giving the ever-increasing rate since then. Other areas of spend have remained largely unchanged.
+This plot highlights that, over the years, spend for `Staffing` related expenses has been increasing with a significant up-tick in the rate of spend since 19/20; provisionally assumed to be COVID related and warrants further investigation given the ever-increasing rate since then. Other areas of spend have remained largely unchanged.
+
+```{r overspend-data, include=FALSE}
+# Every MP / year / category where remaining budget is negative
+overspend_table <- budget_long |>
+  filter(remaining < 0) |>
+  mutate(overspend = -remaining,
+         pct_spent = if_else(budget > 0, spend / budget * 100, NA_real_)) |>
+  arrange(desc(overspend)) |>
+  select(mp, Constituency, financial_year, budget_type,
+         budget, spend, remaining, overspend, pct_spent)
+
+# Percentage of budget used per MP, year and category
+mp_usage <- budget_long |>
+  filter(budget > 0, !is.na(remaining)) |>
+  mutate(pct_spent = (budget - remaining) / budget * 100)   # >100 when remaining is negative
+```
 
 ## Budget Control {.tabset}
-The below two tabs show budgetary over/under spend on an absolute and percentage basis. Click the different buttons to change between bases. There are 229 instances of budgetary overspend that can be identified in the "Overspend" tab.
+The below tabs show budgetary over/under spend on an absolute and percentage basis as well as a table of every overspend instance. Click the different buttons to change between these views. There are `r nrow(overspend_table)` instances of budgetary overspend that can be identified in the "Overspend" tab.
 
 ### Absolute
-```{r budget-variance-absolute, echo=FALSE, , fig.width=12, fig.height=6, out.width="100%"}
-exclude_years_variance <- c("10/11", "11/12", "12/13")
-
-# Parse money text, including negatives written as -£1,234, (1,234) or with a Unicode minus
-parse_money <- function(x) {
-  x <- str_replace_all(x, "[\u2212\u2013\u2014]", "-")
-  neg <- str_detect(x, "^\\s*\\(.*\\)\\s*$") | str_detect(x, "-")
-  num <- suppressWarnings(as.numeric(str_remove_all(x, "[^0-9.]")))
-  if_else(neg, -num, num)
-}
-
+```{r budget-variance-absolute}
 # Total remaining budget per category and year, summed across all MPs
-budget_variance <- map_dfr(budgets, function(b) {
-  rem_col <- paste("Remaining", tolower(b), "budget")
-  if (!rem_col %in% names(spend)) return(NULL)
-  spend |>
-    transmute(financial_year, budget_type = b,
-              remaining = parse_money(.data[[rem_col]]))
-}) |>
+budget_variance <- budget_long |>
   filter(!financial_year %in% exclude_years_variance) |>
   group_by(financial_year, budget_type) |>
   summarise(variance = if_else(all(is.na(remaining)), NA_real_,
                                sum(remaining, na.rm = TRUE)),
             .groups = "drop") |>
   filter(!is.na(variance)) |>
-  mutate(financial_year = factor(financial_year,
-                                 levels = sort(unique(financial_year))))
+  mutate(financial_year = fy_factor(financial_year))
 
 ggplot(budget_variance,
        aes(x = financial_year, y = variance,
@@ -206,103 +218,84 @@ ggplot(budget_variance,
   geom_hline(yintercept = 0, linetype = "dashed", colour = "grey40") +
   geom_line(linewidth = 1) +
   geom_point(size = 2) +
-  scale_y_continuous(labels = scales::label_number(
-    prefix = "£", scale_cut = scales::cut_short_scale())) +
+  money_axis +
   labs(title = "Remaining budget by category",
        subtitle = "Sum of 'Remaining budget' across all MPs (below zero = overspend)",
-       x = "Financial year", y = "Remaining budget", colour = "Budget type") +
-  theme_minimal(base_size = 12) +
-  theme(legend.position = "bottom",
-        plot.background = element_rect(colour = "grey30", fill = NA, linewidth = 1),
-        plot.margin = margin(10, 10, 10, 10))
+       x = "Financial year", y = "Remaining budget", colour = "Budget type")
 ```
 
 ***Figure 2****: Budgetary over/under spend across all constituencies*
 
-
 ### Percentage
-It is important to understand whether MPs are over or underspending on their budget
-```{r ridge-pct-spent, echo=FALSE, fig.width=12, fig.height=6, out.width="100%"}
-plot_usage_ridge <- function(usage, type, overlap = 0.6, bw = 0.3) {
+```{r ridge-function, include=FALSE}
+plot_usage_ridge <- function(d, type, exclude_overspend = TRUE,
+                             overlap = 0.6, bw = 0.3) {
+  max_pct <- if (exclude_overspend) 100 else 120
 
-  dens_df <- usage |>
-    filter(budget_type == type, !is.na(pct_spent)) |>
+  d <- d |> filter(budget_type == type, !is.na(pct_spent))
+  if (exclude_overspend) d <- d |> filter(remaining >= 0)
+
+  dens_df <- d |>
     group_by(financial_year) |>
     filter(n() >= 5, sd(pct_spent) > 0) |>        # KDE needs some spread
     reframe({
       dens <- density(pct_spent, bw = bw * sd(pct_spent),
-                      from = 0, to = 150, n = 500)
+                      from = 0, to = max_pct, n = 500)
       tibble(x = dens$x,
              height = dens$y / max(dens$y),         # same peak height for every ridge
              n = n())
     }) |>
     mutate(label = paste0(financial_year, " (n=", n, ")"),
-           financial_year = factor(financial_year,
-                                   levels = sort(unique(financial_year))),
+           financial_year = fy_factor(financial_year),
            label = factor(label, levels = rev(sort(unique(label)))))  # oldest at the top
 
   ggplot(dens_df, aes(x = x, y = label, height = height, fill = financial_year)) +
     geom_ridgeline(scale = 1 / (1 - overlap), colour = "white",
                    alpha = 0.85, linewidth = 0.5) +
     scale_fill_viridis_d(begin = 0.15, end = 0.9, guide = "none") +
-    # scale_x_continuous(limits = c(0, 100), breaks = seq(0, 100, 10),
-    #                    expand = c(0, 0)) +
-    labs(title = paste0(type, " budget: distribution of % spent by constituency"),
-         subtitle = "Overspends excluded",
+    scale_x_continuous(limits = c(0, max_pct), breaks = seq(0, max_pct, 10),
+                       expand = c(0, 0)) +
+    labs(title = paste0(type, " budget: distribution of % of budget spent by MP"),
+         subtitle = if (exclude_overspend) "Overspends excluded (remaining budget below zero)"
+                    else "Overspends included (axis capped at 150%)",
          x = "% of budget spent", y = NULL) +
-    theme_minimal(base_size = 12) +
     theme(panel.grid.major.y = element_blank(),
           panel.grid.minor = element_blank())
 }
-
-plot_usage_ridge(usage_clean, "Staffing")
 ```
-***Figure 3****: Density plot of percentage spend for each constituency over time. Not that a series of outliers are present where over 100% of the budget is spent.*
+
+```{r ridge-pct-spent}
+plot_usage_ridge(mp_usage, "Staffing", exclude_overspend = FALSE)
+```
+***Figure 3****: Density plot of the percentage of budget spent by each MP over time. Note that a series of outliers are present where over 100% of the budget is spent.*
 
 ### Overspend
-```{r overspend-table, echo=FALSE}
-# Parse money text, including negatives written as -£1,234, (1,234) or with a Unicode minus
-# (skip this definition if parse_money() already exists earlier in the document)
-parse_money <- function(x) {
-  x <- str_replace_all(x, "[\u2212\u2013\u2014]", "-")
-  neg <- str_detect(x, "^\\s*\\(.*\\)\\s*$") | str_detect(x, "-")
-  num <- suppressWarnings(as.numeric(str_remove_all(x, "[^0-9.]")))
-  if_else(neg, -num, num)
-}
-
-overspend_table <- map_dfr(budgets, function(b) {
-  rem_col <- paste("Remaining", tolower(b), "budget")
-  if (!rem_col %in% names(spend)) return(NULL)
-  spend |>
-    transmute(mp = `MP's name`, Constituency, financial_year, budget_type = b,
-              budget    = .data[[paste(b, "budget")]],
-              spend     = .data[[paste(b, "spend")]],
-              remaining = parse_money(.data[[rem_col]]))
-}) |>
-  filter(remaining < 0) |>                          # negative remaining budget = overspend
-  mutate(overspend = -remaining,
-         pct_spent = if_else(budget > 0, spend / budget * 100, NA_real_)) |>
-  arrange(desc(overspend)) |>
-  select(mp, Constituency, financial_year, budget_type,
-         budget, spend, remaining, overspend, pct_spent)
-
-DT::datatable(overspend_table,
-              filter = "top", rownames = FALSE,
-              colnames = c("MP", "Constituency", "Financial year", "Budget type",
-                           "Budget", "Spend", "Remaining budget", "Overspend", "% spent"),
-              options = list(pageLength = 10, scrollX = TRUE)) |>
-  DT::formatCurrency(c("budget", "spend", "remaining", "overspend"),
-                     currency = "£", digits = 0) |>
-  DT::formatRound("pct_spent", 1)
+***Table 1****: All instances of budgetary overspend in any category.*
+```{r overspend-table}
+datatable(overspend_table,
+          filter = "top", rownames = FALSE,
+          colnames = c("MP", "Constituency", "Financial year", "Budget type",
+                       "Budget", "Spend", "Remaining budget", "Overspend", "% spent"),
+          options = list(pageLength = 10, scrollX = TRUE)) |>
+  formatCurrency(c("budget", "spend", "remaining", "overspend"),
+                 currency = "£", digits = 0) |>
+  formatRound("pct_spent", 1)
 ```
 
-## Further Areas of Inquiry
+## {- .unlisted}
+
+Several conclusions can be made on the above visualisations:
+
+- Despite `Staffing` spend increasing, the amount of under spend against budget is also increasing suggesting continuous over-estimation of spend year on year.
+- There a potential up-tick in over-estimation in recent years for `Office` and `Accommodation` expenses, however, more data would be required to draw a firm conclusion.
+- There is an interesting feature in FY 15/16 where a significant proportion of constituencies only spent ~30-40% of their budget. This should be investigated further to confirm validity.
+
+---
+
+# Further Areas of Inquiry
 This analysis provides a few areas that warrant further investigation:
+
 - Confirmation that overspend data is accurate and not due to data quality issues.
-- Understanding of what is driving the rapid increase in staffing spend and budget despite a trend of under spend appearing since budgets have increased.
+- Understanding of what is driving the rapid increase in `Staffing` spend and budget despite a trend of under spend appearing since budgets have increased.
 - Trend analysis of whether specific constituencies are likely to over or under spend on certain areas.
-
-
-
-
-
+- Data quality review to confirm if the outliers of ~30% budget spend in FY 15/16 are valid.
